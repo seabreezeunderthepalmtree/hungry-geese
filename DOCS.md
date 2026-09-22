@@ -1,4 +1,6 @@
-# 游戏规则
+# DOCS
+
+## Rules
 
 - 4 只鹅在 `7 × 11` 的环形棋盘上同时行动。
 - 动作：`NORTH / EAST / SOUTH / WEST`。
@@ -12,6 +14,8 @@
 - 每回合提供完整信息，并非部分可观测环境。
 
 官方介绍见 [Hungry Geese Overview](https://www.kaggle.com/competitions/hungry-geese/overview)。
+
+一些游戏信息由AIfenxi[Kaggle Environment 源码](https://github.com/Kaggle/kaggle-environments/tree/master)得到。
 
 ## Observation
 
@@ -68,17 +72,102 @@ class SimpleAgent:
     def __call__(self, observation, configuration): # no need to input params yourself, Kaggle will do it
         # code here
         return "NORTH" # ACTIONS = ["NORTH", "SOUTH", "EAST", "WEST"]
+```
 
+
+## Gameplay
+
+```python
 agents = [SimpleAgent(),SimpleAgent(),SimpleAgent(),SimpleAgent(),] 
 
 env = make("hungry_geese", debug=True)
 
 env.run(agents)
-
-env.render(mode="ipython",width=800,height=700)
 ```
 
+```python
+env.render(mode="ipython",width=800,height=700) # render game
+
+
+with open("replay.json", "w", encoding="utf-8") as file: # save as JSON
+    json.dump(env.toJSON(), file, ensure_ascii=False)
+
+with open("replay.json", "r", encoding="utf-8") as file: # render JSON
+    replay = json.load(file)
+
+replay_env = make(
+    replay["name"],
+    configuration=replay["configuration"],
+    info=replay.get("info", {}),
+    steps=replay["steps"],
+)
+
+replay_env.render(
+    mode="ipython",
+    width=800,
+    height=700,
+)
+```
+
+## JSON
+
+```json
+{
+  "name": "hungry_geese",
+  "configuration": {},
+  "info": {},
+  "steps": [
+    [
+      {
+        "action": "NORTH",
+        "observation": {},
+        "reward": 0,
+        "status": "ACTIVE",
+        "info": {}
+      }
+    ]
+  ],
+  "rewards": [],
+  "statuses": [],
+  "schema_version": 1
+}
+```
+`steps[回合][玩家]`每回合每个玩家的完整状态。
+
+reward = 存活步数 × (max_length + 1) + 当前身体长度
+
+Status: 
+    ACTIVE：仍在对局中。
+    DONE：正常结束，包括死亡或对局结束。
+    INVALID：返回了非法动作。
+    ERROR：Agent 运行报错。
+    TIMEOUT：Agent 超时。
+
+## Files
+
+`model.py`:
+    model architecture
+`utils.py`:
+    long functions used in other files
+`constants.py`:
+    constants for coding
+`agent.py`:
+    load the model, let it read the observations, and return an action. The agent class is `Agent`.
+`generate.py`: 
+    generate gameplay for training. 
+    Format: gameplays/model_000002/game_000001.json
+    The greatest numeric model ID is loaded. A checkpoint may be a raw state_dict or a dictionary containing its state_dict under "model_state_dict". If no valid checkpoint exists, random weights are used and files are written under gameplays/random_init/. Existing replay numbers are never overwritten.
+    command format: `python generate.py --games 16 --models-dir models --gameplays-dir gameplays --debug`
+
+
+Checkpoint format:
+models/model_000001.pt
+models/model_000002.pt
+
+
 ## to-do
+
+
 
 模型默认 CPU；外部调用 model.to("cuda"/"mps") 才使用 GPU。
 Agent 会自动把所有模型输入移到模型所在设备。
@@ -86,12 +175,13 @@ Agent 会自动把所有模型输入移到模型所在设备。
 单局小模型推理建议 CPU；批量训练或批量推理再用 GPU。
 
 step0不会用作训练，因为不是模型的决定。
+注意模型命名规则
 
-bonus: eat food 1, collision/starve -20, move 0.05, around food +0.1, around head -2
+reward = 存活步数 × (max_length + 1) + 当前身体长度 自己打自己会不会合作 然后如何弄局间奖励惩罚
 
-generate: for each iteration, generate 128 games, max time 200. Just run 4 agents using the latest model
+generate: generate 16 games, max time 200. Just run 4 agents using the latest model. If no model, use random weight.
 
-train: Stable-Baselines3 PPO
+train: Stable-Baselines3 PPO, each iteration ? epochs
 
 val: early stopping；checkpoints combat each other;
 
