@@ -80,6 +80,10 @@ env.render(mode="ipython",width=800,height=700)
 
 ## to-do
 
+模型默认 CPU；外部调用 model.to("cuda"/"mps") 才使用 GPU。
+Agent 会自动把所有模型输入移到模型所在设备。
+生存模拟始终在 CPU。
+单局小模型推理建议 CPU；批量训练或批量推理再用 GPU。
 
 step0不会用作训练，因为不是模型的决定。
 

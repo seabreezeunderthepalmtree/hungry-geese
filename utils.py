@@ -230,7 +230,9 @@ def get_survival_mask(
         first move and at least one legal continuation survives until ``steps``
         moves have been simulated.
 
-        The controlled goose moves normally: its tail leaves unless it eats a
+        Collision is checked against every body cell occupied at the start of
+        each simulated move, including tails that disappear later in that move.
+        After a safe move, the controlled goose's tail leaves unless it eats a
         currently known food, and it loses an additional tail segment on hunger
         turns. Each opponent head stays fixed while one opponent tail segment
         disappears per simulated move. Opponent movement, food replenishment,
@@ -306,9 +308,11 @@ def get_survival_mask(
         """Simulate one controlled move and its simplified surroundings.
 
         Explanation:
-            Moves the controlled head, updates growth and hunger, advances the
-            simplified opponent bodies, and rejects collisions against any body
-            cell that remains occupied after tail removal.
+            Finds the controlled goose's destination and first rejects a
+            collision with any body cell occupied at the start of the move.
+            This includes own and opponent tails even when they disappear later
+            in the same turn. After that check, it updates growth and hunger and
+            advances the simplified opponent bodies.
 
         Args:
             own_goose: Current controlled body with its head first.
@@ -322,6 +326,14 @@ def get_survival_mask(
             goose survives; otherwise ``None``.
         """
         new_head = _next_position(own_goose[0], direction)
+        occupied_before_tail_removal = {
+            position
+            for goose in (own_goose, *opponent_geese)
+            for position in goose
+        }
+        if new_head in occupied_before_tail_removal:
+            return None
+
         next_own_goose = [new_head, *own_goose]
         next_food = set(food)
 
@@ -336,17 +348,6 @@ def get_survival_mask(
                 return None
 
         next_opponents = _advance_opponents(opponent_geese)
-        occupied_by_opponents = {
-            position
-            for goose in next_opponents
-            for position in goose
-        }
-        if (
-            new_head in next_own_goose[1:]
-            or new_head in occupied_by_opponents
-        ):
-            return None
-
         return next_own_goose, next_opponents, next_food
 
     def _has_survival_path(
@@ -468,4 +469,3 @@ def get_survival_mask(
         )
 
     return mask[NORTH], mask[EAST], mask[SOUTH], mask[WEST]
-
