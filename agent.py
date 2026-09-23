@@ -28,7 +28,7 @@ class Agent:
         self.model = model
         self.model.eval()
         self.previous_direction: int | None = None
-        self.ppo_trajectory: list[dict[str, object]] = []
+        self.ppo_trajectory: list[dict[str, object]] = [] # saved for training
 
     def __call__(
         self,
