@@ -191,14 +191,27 @@ models/model_000002.pt
 
 ## to-do
 
+PPO 生成对局时，通常保存这些就够：
+state / obs
+action
+reward
+done
+old_log_prob
+old_value
+不需要为了训练专门保存旧模型权重。
+之后用 reward + old_value 算 GAE：
+$$ \hat A_t $$
+再用：
+$$ \exp(\log p_{\text{new}}-\log p_{\text{old}}) $$
+算 PPO ratio。
+模型权重主要是为了 checkpoint，不是 PPO 训练数据本身必须的。
+
 train: Stable-Baselines3 PPO, each iteration ? epochs
 模型默认 CPU；外部调用 model.to("cuda"/"mps") 才使用 GPU。
 Agent 会自动把所有模型输入移到模型所在设备。
 生存模拟始终在 CPU。
 单局小模型推理建议 CPU；批量训练或批量推理再用 GPU。
-
 step0不会用作训练，因为不是模型的决定。
-
 注意模型储存规则
 
 reward = 存活步数 × (max_length + 1) + 当前身体长度
