@@ -244,10 +244,12 @@ class SimpleAgent:
         """Choose an absolute action with a small fixed heuristic.
 
         Explanation:
-            Avoids occupied cells and immediate reversal, strongly discourages
-            moves an opponent head could also reach, prefers moves toward the
-            nearest food, and uses a small random tie-breaker. Internal state is
-            reset whenever a new game starts at step zero.
+            Applies the shared two-step survival mask, falling back to a
+            one-step mask when every direction is rejected. Among surviving
+            directions, it strongly discourages moves an opponent head could
+            also reach, prefers moves toward the nearest food, and uses a small
+            random tie-breaker. Internal state is reset whenever a new game
+            starts at step zero.
 
         Args:
             observation: Current Kaggle Hungry Geese observation.
@@ -273,6 +275,40 @@ class SimpleAgent:
             return "NORTH"
 
         my_head = my_goose[0]
+
+        current_direction = (
+            None
+            if self.last_action is None
+            else DIRECTION_NAMES.index(self.last_action)
+        )
+        remaining_steps = max(MAX_STEPS - observation["step"], 0)
+        survival_steps = (
+            SURVIVAL_HORIZON
+            if remaining_steps > SURVIVAL_HORIZON
+            else FALLBACK_SURVIVAL_HORIZON
+        )
+        survival_mask = get_survival_mask(
+            observation,
+            current_direction=current_direction,
+            steps=survival_steps,
+        )
+        available_actions = [
+            action
+            for action in self.actions
+            if survival_mask[DIRECTION_NAMES.index(action)]
+        ]
+
+        if not available_actions and survival_steps == SURVIVAL_HORIZON:
+            survival_mask = get_survival_mask(
+                observation,
+                current_direction=current_direction,
+                steps=FALLBACK_SURVIVAL_HORIZON,
+            )
+            available_actions = [
+                action
+                for action in self.actions
+                if survival_mask[DIRECTION_NAMES.index(action)]
+            ]
 
         def to_rc(pos):
             """Convert a flattened board position to row and column.
@@ -343,11 +379,6 @@ class SimpleAgent:
 
             return dr + dc
 
-        # 当前所有身体位置
-        occupied = set()
-        for goose in geese:
-            occupied.update(goose)
-
         # 敌方鹅头下一步可能到达的位置
         enemy_head_danger = set()
 
@@ -364,20 +395,8 @@ class SimpleAgent:
 
         candidates = []
 
-        for action in self.actions:
-
-            # 不允许立即反向
-            if (
-                self.last_action is not None
-                and action == self.opposite[self.last_action]
-            ):
-                continue
-
+        for action in available_actions:
             new_pos = next_pos(my_head, action)
-
-            # 撞身体，直接排除
-            if new_pos in occupied:
-                continue
 
             score = 0
 
