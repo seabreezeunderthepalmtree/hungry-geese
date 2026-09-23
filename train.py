@@ -6,6 +6,7 @@ from __future__ import annotations
 #
 # Training output:
 #   models/model_000001.pt
+#   training_logs/model_000001.json
 #
 # The newest numeric checkpoint is used, and every replay in its matching
 # gameplay directory is consumed once. The complete rollout is reused for all
@@ -16,6 +17,7 @@ from __future__ import annotations
 #   python train.py
 #   python train.py --epochs 4 --minibatch-size 256
 #   python train.py --learning-rate 0.0003 --device auto
+#   python train.py --logs-dir training_logs
 
 import argparse
 import json
@@ -222,6 +224,15 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path(DEFAULT_GAMEPLAYS_DIRECTORY),
         help=f"replay root directory (default: {DEFAULT_GAMEPLAYS_DIRECTORY})",
+    )
+    parser.add_argument(
+        "--logs-dir",
+        type=Path,
+        default=Path(DEFAULT_TRAINING_LOGS_DIRECTORY),
+        help=(
+            "training-log directory "
+            f"(default: {DEFAULT_TRAINING_LOGS_DIRECTORY})"
+        ),
     )
     parser.add_argument(
         "--epochs",
@@ -930,7 +941,7 @@ def _train_model(
     args: argparse.Namespace,
     device: torch.device,
     optimizer_state: Mapping[str, Any] | None,
-) -> torch.optim.Optimizer:
+) -> tuple[torch.optim.Optimizer, list[dict[str, float | int]]]:
     """Optimize the actor-critic with clipped PPO updates.
 
     Explanation:
@@ -946,7 +957,7 @@ def _train_model(
         optimizer_state: Adam state from the previous iteration, if available.
 
     Returns:
-        Updated optimizer whose state should be saved with the model.
+        Updated optimizer and one metrics dictionary for every epoch.
     """
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     if optimizer_state is not None:
@@ -954,6 +965,7 @@ def _train_model(
         for parameter_group in optimizer.param_groups:
             parameter_group["lr"] = args.learning_rate
     sample_count = len(rollout)
+    epoch_metrics: list[dict[str, float | int]] = []
 
     for epoch in range(args.epochs):
         permutation = torch.randperm(sample_count)
@@ -1033,13 +1045,21 @@ def _train_model(
         mean_policy_loss = policy_loss_sum / max(actor_count, 1)
         mean_entropy = entropy_sum / max(actor_count, 1)
         mean_value_loss = value_loss_sum / value_count
+        epoch_metrics.append(
+            {
+                "epoch": epoch + 1,
+                "policy_loss": mean_policy_loss,
+                "value_loss": mean_value_loss,
+                "entropy": mean_entropy,
+            }
+        )
         print(
             f"Epoch {epoch + 1}/{args.epochs}: "
             f"policy_loss={mean_policy_loss:.6f}, "
             f"value_loss={mean_value_loss:.6f}, "
             f"entropy={mean_entropy:.6f}"
         )
-    return optimizer
+    return optimizer, epoch_metrics
 
 
 def _save_next_checkpoint(
@@ -1087,6 +1107,42 @@ def _save_next_checkpoint(
     return checkpoint_path
 
 
+def _save_training_log(
+    log_data: Mapping[str, Any],
+    logs_directory: Path,
+    model_id: int,
+) -> Path:
+    """Save one model iteration's readable training metrics.
+
+    Explanation:
+        Writes a formatted JSON file whose numeric ID matches the newly trained
+        model. Existing logs are never overwritten.
+
+    Args:
+        log_data: Training metadata and per-epoch metrics.
+        logs_directory: Destination directory for training logs.
+        model_id: Numeric ID of the newly trained model.
+
+    Returns:
+        Path of the saved JSON training log.
+    """
+    logs_directory.mkdir(parents=True, exist_ok=True)
+    log_path = logs_directory / TRAINING_LOG_FILENAME_TEMPLATE.format(
+        model_id=model_id,
+    )
+    if log_path.exists():
+        raise FileExistsError(f"refusing to overwrite {log_path}")
+
+    with log_path.open("x", encoding=REPLAY_FILE_ENCODING) as log_file:
+        json.dump(
+            log_data,
+            log_file,
+            ensure_ascii=False,
+            indent=2,
+        )
+    return log_path
+
+
 def train(args: argparse.Namespace) -> Path:
     """Train and save the next model iteration.
 
@@ -1126,14 +1182,49 @@ def train(args: argparse.Namespace) -> Path:
     )
 
     model, optimizer_state = _load_model(checkpoint_path, device)
-    optimizer = _train_model(model, rollout, args, device, optimizer_state)
+    optimizer, epoch_metrics = _train_model(
+        model,
+        rollout,
+        args,
+        device,
+        optimizer_state,
+    )
     saved_path = _save_next_checkpoint(
         model,
         optimizer,
         args.models_dir,
         model_id,
     )
+    trained_model_id = model_id + 1
+    log_path = _save_training_log(
+        {
+            "schema_version": TRAINING_LOG_SCHEMA_VERSION,
+            "source_model_id": model_id,
+            "trained_model_id": trained_model_id,
+            "checkpoint": str(saved_path),
+            "device": str(device),
+            "replay_count": len(replay_paths),
+            "decision_count": len(rollout),
+            "actor_valid_count": actor_samples,
+            "hyperparameters": {
+                "epochs": args.epochs,
+                "minibatch_size": args.minibatch_size,
+                "learning_rate": args.learning_rate,
+                "gamma": args.gamma,
+                "gae_lambda": args.gae_lambda,
+                "clip_coefficient": args.clip_coefficient,
+                "value_loss_coefficient": args.value_loss_coefficient,
+                "entropy_coefficient": args.entropy_coefficient,
+                "max_gradient_norm": args.max_gradient_norm,
+                "seed": args.seed,
+            },
+            "epochs": epoch_metrics,
+        },
+        args.logs_dir,
+        trained_model_id,
+    )
     print(f"Saved checkpoint: {saved_path}")
+    print(f"Saved training log: {log_path}")
     return saved_path
 
 

@@ -199,8 +199,8 @@ Status:
     command format: `python generate.py --games 16 --simple-agent-probability 0.1 --models-dir models --gameplays-dir gameplays --debug`
 
 `train.py`:
-    load the newest model and every replay in its matching gameplay directory, perform one PPO iteration, and save the next model number.
-    command format: `python train.py --epochs 4 --minibatch-size 256 --learning-rate 0.0003 --device auto`
+    load the newest model and every replay in its matching gameplay directory, perform one PPO iteration, save the next model number, and save its training metrics.
+    command format: `python train.py --epochs 4 --minibatch-size 256 --learning-rate 0.0003 --device auto --logs-dir training_logs`
 
 
 Checkpoint format:
@@ -229,6 +229,17 @@ Checkpoints written by `train.py` contain both `model_state_dict` and
 `optimizer_state_dict`, so Adam momentum and variance continue across training
 iterations. A command-line learning rate explicitly replaces the restored
 optimizer learning rate.
+
+Every successful iteration also writes a readable log with the same model ID:
+
+```text
+training_logs/model_000001.json
+training_logs/model_000002.json
+```
+
+Each log contains the source and trained model IDs, checkpoint path, device,
+replay and decision counts, hyperparameters, and per-epoch `policy_loss`,
+`value_loss`, and `entropy`. Existing log files are never overwritten.
 
 For a trajectory record at `step = t`:
 
@@ -275,5 +286,6 @@ python train.py \
     --entropy-coefficient 0.01 \
     --max-gradient-norm 0.5 \
     --device auto \
+    --logs-dir training_logs \
     --seed 0
 ```
