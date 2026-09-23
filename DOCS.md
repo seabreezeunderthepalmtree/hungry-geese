@@ -177,34 +177,36 @@ Status:
     constants for coding
 `agent.py`:
     load the model, let it read the observations, and return an action. The agent class is `Agent`. There's another class called `SimpleAgent` whose behavior is defined by code rather than by the model, to prevent `Agent` instances from cooperating with each other.
-`generate.py`: 
-    generate gameplay for training. 
+`generate.py`:
+    generate PPO-ready gameplay for training.
     Format: gameplays/model_000002/game_000001.json
-    The greatest numeric model ID is loaded. A checkpoint may be a raw state_dict or a dictionary containing its state_dict under "model_state_dict". If no valid checkpoint exists, random weights are used and files are written under gameplays/random_init/. Existing replay numbers are never overwritten.
-    command format: `python generate.py --games 16 --models-dir models --gameplays-dir gameplays --debug`
+    The greatest numeric model ID is loaded. A checkpoint may be a raw state_dict or a dictionary containing its state_dict under "model_state_dict". If no valid checkpoint exists, random weights are saved as `models/model_000000.pt` before any game is generated. Existing replay numbers are never overwritten.
+    Every player seat has a default 10% probability of using `SimpleAgent`, and every game keeps at least one model player.
+    Every replay keeps the official Kaggle fields and adds a top-level `ppo` object:
+        ppo
+        schema_version
+        model_id
+        player_types
+        trainable_players
+        trajectories[player]
+            step
+            relative_action
+            action_logit_vec
+            value
+            action_mask
+            policy_sampled
+    `relative_action` uses `FORWARD / LEFT / RIGHT` order. `action_logit_vec` contains the three raw model logits before masking, and `action_mask` uses the same order. `step == 0` and `SimpleAgent` decisions are not stored in PPO trajectories. When `policy_sampled` is false, all survival actions were masked and the action came from the random fallback; exclude that record from the actor loss, but it can still train the critic.
+    command format: `python generate.py --games 16 --simple-agent-probability 0.1 --models-dir models --gameplays-dir gameplays --debug`
 
 
 Checkpoint format:
+models/model_000000.pt
 models/model_000001.pt
 models/model_000002.pt
 
 
-## to-do
 
-PPO 生成对局时，通常保存这些就够：
-state / obs
-action
-reward
-done
-old_log_prob
-old_value
-不需要为了训练专门保存旧模型权重。
-之后用 reward + old_value 算 GAE：
-$$ \hat A_t $$
-再用：
-$$ \exp(\log p_{\text{new}}-\log p_{\text{old}}) $$
-算 PPO ratio。
-模型权重主要是为了 checkpoint，不是 PPO 训练数据本身必须的。
+## to-do
 
 train: Stable-Baselines3 PPO, each iteration ? epochs
 模型默认 CPU；外部调用 model.to("cuda"/"mps") 才使用 GPU。
@@ -216,9 +218,7 @@ step0不会用作训练，因为不是模型的决定。
 
 reward = 存活步数 × (max_length + 1) + 当前身体长度
 每步奖励 = delta_reward / 20000
-赢过一个对手：+1/3
-输给一个对手：-1/3
+赢过一个对手：+1/3（杀死时结算）
+输给一个对手：-1/3（死亡时结算）
 平局：0
-10\%概率是simpleagent
-
 

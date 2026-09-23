@@ -16,7 +16,8 @@ class Agent:
 
         Explanation:
             Stores the supplied model in evaluation mode and initializes the
-            remembered absolute direction for a new game.
+            remembered absolute direction and PPO decision history for a new
+            game.
 
         Args:
             model: Trained Hungry Geese actor-critic model used for inference.
@@ -27,6 +28,7 @@ class Agent:
         self.model = model
         self.model.eval()
         self.previous_direction: int | None = None
+        self.ppo_trajectory: list[dict[str, object]] = []
 
     def __call__(
         self,
@@ -82,7 +84,7 @@ class Agent:
             )
 
             with torch.no_grad():
-                action_logits, _ = self.model(
+                action_logits, state_value = self.model(
                     board_tensor,
                     remaining_tensor,
                     direction_tensor,
@@ -127,14 +129,15 @@ class Agent:
                     if survival_mask[absolute_direction]
                 ]
 
+            action_mask = torch.tensor(
+                [action in available_actions for action in VALID_ACTIONS],
+                device=action_logits.device,
+                dtype=torch.bool,
+            )
             if not available_actions:
                 chosen_action = random.choice(VALID_ACTIONS)
+                policy_sampled = False
             else:
-                action_mask = torch.tensor(
-                    [action in available_actions for action in VALID_ACTIONS],
-                    device=action_logits.device,
-                    dtype=torch.bool,
-                )
                 masked_logits = action_logits.masked_fill(
                     ~action_mask,
                     MASKED_LOGIT,
@@ -143,12 +146,31 @@ class Agent:
                     logits=masked_logits,
                 )
                 chosen_action = int(distribution.sample().item())
+                policy_sampled = True
+
+            self.ppo_trajectory.append(
+                {
+                    "step": step,
+                    "relative_action": chosen_action,
+                    "action_logit_vec": [
+                        float(logit)
+                        for logit in action_logits.detach().cpu().tolist()
+                    ],
+                    "value": float(state_value.reshape(-1)[0].item()),
+                    "action_mask": [
+                        bool(is_available)
+                        for is_available in action_mask.detach().cpu().tolist()
+                    ],
+                    "policy_sampled": policy_sampled,
+                }
+            )
 
             chosen_direction = absolute_directions[chosen_action]
             self.previous_direction = chosen_direction
             return DIRECTION_NAMES[chosen_direction]
 
         self.previous_direction = None
+        self.ppo_trajectory = []
 
         survival_mask = get_survival_mask(
             observation,

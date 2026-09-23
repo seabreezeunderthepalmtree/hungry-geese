@@ -1,9 +1,27 @@
 from __future__ import annotations
 
-
+# Checkpoint format:
+#   models/model_000000.pt
+#   models/model_000001.pt
+# The greatest numeric model ID is loaded. If none exists, model_000000.pt is
+# created from the random initialization before any gameplay is generated.
+#
+# Replay format:
+#   gameplays/model_000001/game_000001.json
+# Every file contains the official Kaggle replay plus a top-level "ppo" object.
+# ppo.trajectories[player] contains model decisions for that player. Step zero
+# and SimpleAgent decisions are intentionally absent. A decision whose
+# policy_sampled value is false used the all-masked random fallback and should
+# be excluded from the PPO actor loss while remaining usable by the critic.
+#
+# Parameter format:
+#   python generate.py --games 16
+#   python generate.py --simple-agent-probability 0.1
+#   python generate.py --models-dir models --gameplays-dir gameplays --debug
 
 import argparse
 import json
+import random
 import re
 from pathlib import Path
 from typing import Mapping, cast
@@ -12,7 +30,7 @@ import torch
 from kaggle_environments import make
 from torch import Tensor
 
-from agent import Agent
+from agent import Agent, SimpleAgent
 from constants import *
 from model import HungryGeeseActorCritic
 
@@ -22,7 +40,7 @@ def _positive_integer(value: str) -> int:
 
     Explanation:
         Converts an argparse value to an integer and rejects zero or negative
-        values so a generation command always requests at least one game.
+        values so generation always requests at least one game.
 
     Args:
         value: Raw command-line value.
@@ -43,12 +61,38 @@ def _positive_integer(value: str) -> int:
     return parsed_value
 
 
+def _probability(value: str) -> float:
+    """Parse a command-line probability from zero through one.
+
+    Explanation:
+        Converts an argparse value to float and validates the closed unit
+        interval used for the SimpleAgent probability.
+
+    Args:
+        value: Raw command-line value.
+
+    Returns:
+        Parsed probability.
+
+    Raises:
+        argparse.ArgumentTypeError: If the value is not in ``[0, 1]``.
+    """
+    try:
+        parsed_value = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a number") from error
+
+    if not 0.0 <= parsed_value <= 1.0:
+        raise argparse.ArgumentTypeError("must be between 0 and 1")
+    return parsed_value
+
+
 def parse_args() -> argparse.Namespace:
     """Parse gameplay-generation command-line arguments.
 
     Explanation:
-        Provides editable model location, replay location, game count, and
-        Kaggle debug output while keeping their defaults in ``constants.py``.
+        Exposes commonly changed generation options while keeping every default
+        value in ``constants.py``.
 
     Args:
         None.
@@ -57,7 +101,7 @@ def parse_args() -> argparse.Namespace:
         Parsed argparse namespace.
     """
     parser = argparse.ArgumentParser(
-        description="Generate Hungry Geese self-play replay JSON files.",
+        description="Generate PPO-ready Hungry Geese replay JSON files.",
     )
     parser.add_argument(
         "--models-dir",
@@ -81,6 +125,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--simple-agent-probability",
+        type=_probability,
+        default=DEFAULT_SIMPLE_AGENT_PROBABILITY,
+        help=(
+            "probability that each seat uses SimpleAgent "
+            f"(default: {DEFAULT_SIMPLE_AGENT_PROBABILITY})"
+        ),
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         default=DEFAULT_GENERATION_DEBUG,
@@ -93,9 +146,9 @@ def _find_latest_checkpoint(models_directory: Path) -> tuple[Path, int] | None:
     """Find the checkpoint with the greatest numeric model ID.
 
     Explanation:
-        Examines only files matching the documented ``model_<id>.pt`` or
-        ``model_<id>.pth`` convention. Numeric IDs, rather than timestamps or
-        lexicographic filename order, determine which model is latest.
+        Examines only files matching ``model_<id>.pt`` or ``model_<id>.pth``.
+        Numeric IDs, rather than timestamps or lexicographic order, determine
+        which model is latest.
 
     Args:
         models_directory: Directory containing model checkpoints.
@@ -126,17 +179,15 @@ def _load_model(checkpoint_path: Path | None) -> HungryGeeseActorCritic:
     """Create the inference model and optionally load checkpoint weights.
 
     Explanation:
-        Initializes the standard actor-critic on CPU. When a checkpoint is
-        supplied, it accepts either a raw PyTorch state dictionary or a wrapper
-        containing ``model_state_dict``. If no checkpoint exists, the model's
-        normal random orthogonal initialization is retained.
+        Initializes the actor-critic on CPU. A checkpoint may be either a raw
+        PyTorch state dictionary or a wrapper containing ``model_state_dict``.
+        With no checkpoint, the model keeps its normal random initialization.
 
     Args:
-        checkpoint_path: Selected checkpoint path, or ``None`` for random
-            initialization.
+        checkpoint_path: Checkpoint path, or ``None`` for random initialization.
 
     Returns:
-        Model in evaluation mode on the configured generation device.
+        Model in evaluation mode on the generation device.
     """
     model = HungryGeeseActorCritic().to(GENERATION_DEVICE)
     if checkpoint_path is not None:
@@ -151,20 +202,49 @@ def _load_model(checkpoint_path: Path | None) -> HungryGeeseActorCritic:
             raise TypeError(
                 "checkpoint must be a state_dict or contain model_state_dict"
             )
-        state_dict = cast(Mapping[str, Tensor], checkpoint)
-        model.load_state_dict(state_dict)
+        model.load_state_dict(cast(Mapping[str, Tensor], checkpoint))
 
     model.eval()
     return model
+
+
+def _prepare_model(
+    models_directory: Path,
+) -> tuple[HungryGeeseActorCritic, int, Path]:
+    """Load the latest model or create and save model zero.
+
+    Explanation:
+        Ensures every generated trajectory has a persistent checkpoint matching
+        the behavior policy. When no checkpoint exists, the random weights are
+        saved before play as ``model_000000.pt``.
+
+    Args:
+        models_directory: Directory used to find and save checkpoints.
+
+    Returns:
+        ``(model, model_id, checkpoint_path)`` for the behavior policy.
+    """
+    latest_checkpoint = _find_latest_checkpoint(models_directory)
+    if latest_checkpoint is not None:
+        checkpoint_path, model_id = latest_checkpoint
+        return _load_model(checkpoint_path), model_id, checkpoint_path
+
+    model_id = 0
+    model = _load_model(None)
+    models_directory.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = models_directory / CHECKPOINT_FILENAME_TEMPLATE.format(
+        model_id=model_id,
+    )
+    torch.save(model.state_dict(), checkpoint_path)
+    return model, model_id, checkpoint_path
 
 
 def _next_replay_id(output_directory: Path) -> int:
     """Find the next unused sequential replay ID.
 
     Explanation:
-        Scans existing files matching ``game_<id>.json`` and returns one above
-        the greatest ID. Unrelated files are ignored, preventing accidental
-        overwrite when generation is resumed.
+        Scans files matching ``game_<id>.json`` and returns one above the
+        greatest ID so resumed generation does not overwrite existing games.
 
     Args:
         output_directory: Model-specific replay directory.
@@ -183,15 +263,97 @@ def _next_replay_id(output_directory: Path) -> int:
     return greatest_id + 1
 
 
-def _save_replay(replay: Mapping[str, object], replay_path: Path) -> None:
-    """Save one complete Kaggle replay as compact JSON.
+def _build_agents(
+    model: HungryGeeseActorCritic,
+    simple_agent_probability: float,
+) -> tuple[list[object], list[str], list[Agent | None]]:
+    """Build one randomized four-player matchup.
 
     Explanation:
-        Serializes the full result of ``env.toJSON()`` immediately after a game
-        so already completed games remain available if a later game fails.
+        Independently assigns SimpleAgent to each seat with the configured
+        probability and Agent otherwise. At least one model Agent is guaranteed
+        so every saved game contributes trainable data.
 
     Args:
-        replay: Complete Kaggle environment replay object.
+        model: Shared fixed behavior model for all model-controlled seats.
+        simple_agent_probability: Probability that one seat uses SimpleAgent.
+
+    Returns:
+        Kaggle agents, player-type labels, and aligned model-agent recorders.
+    """
+    agents: list[object] = []
+    player_types: list[str] = []
+    model_agents: list[Agent | None] = []
+
+    for _ in range(NUM_PLAYERS):
+        if random.random() < simple_agent_probability:
+            agents.append(SimpleAgent())
+            player_types.append(SIMPLE_PLAYER_TYPE)
+            model_agents.append(None)
+        else:
+            model_agent = Agent(model)
+            agents.append(model_agent)
+            player_types.append(MODEL_PLAYER_TYPE)
+            model_agents.append(model_agent)
+
+    if all(model_agent is None for model_agent in model_agents):
+        player = random.randrange(NUM_PLAYERS)
+        model_agent = Agent(model)
+        agents[player] = model_agent
+        player_types[player] = MODEL_PLAYER_TYPE
+        model_agents[player] = model_agent
+
+    return agents, player_types, model_agents
+
+
+def _attach_ppo_data(
+    replay: dict[str, object],
+    model_id: int,
+    player_types: list[str],
+    model_agents: list[Agent | None],
+) -> None:
+    """Attach model rollout data without altering official replay steps.
+
+    Explanation:
+        Adds a separate top-level PPO object. Its trajectories remain aligned by
+        player index, while non-model players receive empty trajectories.
+
+    Args:
+        replay: Mutable result returned by ``environment.toJSON()``.
+        model_id: Numeric behavior-model identifier.
+        player_types: Controller type for every player position.
+        model_agents: Model Agent instances aligned with player positions.
+
+    Returns:
+        None.
+    """
+    trainable_players = [
+        player
+        for player, model_agent in enumerate(model_agents)
+        if model_agent is not None
+    ]
+    trajectories = [
+        [] if model_agent is None else model_agent.ppo_trajectory
+        for model_agent in model_agents
+    ]
+    replay[PPO_REPLAY_KEY] = {
+        "schema_version": PPO_REPLAY_SCHEMA_VERSION,
+        "model_id": model_id,
+        "player_types": player_types,
+        "trainable_players": trainable_players,
+        "trajectories": trajectories,
+    }
+
+
+def _save_replay(replay: Mapping[str, object], replay_path: Path) -> None:
+    """Save one complete Kaggle replay and its PPO data as compact JSON.
+
+    Explanation:
+        Writes each game immediately so completed games remain available if a
+        later game fails.
+
+    Args:
+        replay: Complete replay with the additional PPO object.
         replay_path: Destination JSON path.
 
     Returns:
@@ -207,13 +369,12 @@ def _save_replay(replay: Mapping[str, object], replay_path: Path) -> None:
 
 
 def generate_games(args: argparse.Namespace) -> list[Path]:
-    """Generate self-play games using the latest available model.
+    """Generate PPO-ready Hungry Geese gameplay files.
 
     Explanation:
-        Loads the greatest numbered checkpoint once, or creates one randomly
-        initialized model when no checkpoint exists. Every game creates four
-        independent Agent instances sharing those fixed weights, runs for at
-        most ``MAX_STEPS``, and saves the official Kaggle replay JSON.
+        Uses one persistent CPU behavior model for the whole batch. Each game
+        randomizes model and SimpleAgent seats, runs at most ``MAX_STEPS``, and
+        saves both the official replay and aligned PPO decision data.
 
     Args:
         args: Parsed arguments from ``parse_args``.
@@ -221,39 +382,40 @@ def generate_games(args: argparse.Namespace) -> list[Path]:
     Returns:
         Paths of all replay files generated by this call.
     """
-    latest_checkpoint = _find_latest_checkpoint(args.models_dir)
-    if latest_checkpoint is None:
-        checkpoint_path = None
-        model_id = None
-        output_directory_name = RANDOM_INITIALIZATION_DIRECTORY
-        print("No checkpoint found; using randomly initialized weights.")
-    else:
-        checkpoint_path, model_id = latest_checkpoint
-        output_directory_name = REPLAY_MODEL_DIRECTORY_TEMPLATE.format(
-            model_id=model_id,
-        )
-        print(f"Using checkpoint: {checkpoint_path}")
+    model, model_id, checkpoint_path = _prepare_model(args.models_dir)
+    print(f"Using checkpoint: {checkpoint_path}")
 
-    model = _load_model(checkpoint_path)
-    output_directory = args.gameplays_dir / output_directory_name
+    output_directory = args.gameplays_dir / REPLAY_MODEL_DIRECTORY_TEMPLATE.format(
+        model_id=model_id,
+    )
     output_directory.mkdir(parents=True, exist_ok=True)
     first_replay_id = _next_replay_id(output_directory)
     generated_paths: list[Path] = []
 
     for offset in range(args.games):
         replay_id = first_replay_id + offset
+        agents, player_types, model_agents = _build_agents(
+            model,
+            args.simple_agent_probability,
+        )
         environment = make(
             ENVIRONMENT_NAME,
             configuration={EPISODE_STEPS_CONFIGURATION_KEY: MAX_STEPS},
             debug=args.debug,
         )
-        agents = [Agent(model) for _ in range(NUM_PLAYERS)]
         environment.run(agents)
 
+        replay = environment.toJSON()
+        _attach_ppo_data(
+            replay,
+            model_id,
+            player_types,
+            model_agents,
+        )
         replay_path = output_directory / REPLAY_FILENAME_TEMPLATE.format(
             game_id=replay_id,
         )
-        _save_replay(environment.toJSON(), replay_path)
+        _save_replay(replay, replay_path)
         generated_paths.append(replay_path)
         print(f"Saved {replay_path}")
 
