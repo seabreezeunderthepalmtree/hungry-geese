@@ -209,3 +209,216 @@ class Agent:
 
         self.previous_direction = chosen_direction
         return DIRECTION_NAMES[chosen_direction]
+
+class SimpleAgent:
+    actions = ["NORTH", "SOUTH", "EAST", "WEST"]
+    opposite = {
+        "NORTH": "SOUTH",
+        "SOUTH": "NORTH",
+        "EAST": "WEST",
+        "WEST": "EAST",
+    }
+    move = {
+        "NORTH": (-1, 0),
+        "SOUTH": (1, 0),
+        "EAST": (0, 1),
+        "WEST": (0, -1),
+    }
+
+    def __init__(self) -> None:
+        """Initialize the fixed heuristic opponent.
+
+        Explanation:
+            Starts without a previous action so every direction is available on
+            the first turn of a game.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+        """
+        self.last_action: str | None = None
+
+    def __call__(self, observation, configuration) -> str:
+        """Choose an absolute action with a small fixed heuristic.
+
+        Explanation:
+            Avoids occupied cells and immediate reversal, strongly discourages
+            moves an opponent head could also reach, prefers moves toward the
+            nearest food, and uses a small random tie-breaker. Internal state is
+            reset whenever a new game starts at step zero.
+
+        Args:
+            observation: Current Kaggle Hungry Geese observation.
+            configuration: Kaggle environment configuration containing board
+                dimensions.
+
+        Returns:
+            One of ``NORTH``, ``SOUTH``, ``EAST``, or ``WEST``.
+        """
+        if observation["step"] == 0:
+            self.last_action = None
+
+        rows = configuration["rows"]
+        cols = configuration["columns"]
+
+        geese = observation["geese"]
+        food = observation["food"]
+        my_index = observation["index"]
+
+        my_goose = geese[my_index]
+
+        if not my_goose:
+            return "NORTH"
+
+        my_head = my_goose[0]
+
+        def to_rc(pos):
+            """Convert a flattened board position to row and column.
+
+            Explanation:
+                Uses the configured column count to decode a board position.
+
+            Args:
+                pos: Flattened board position.
+
+            Returns:
+                ``(row, column)`` coordinates.
+            """
+            return pos // cols, pos % cols
+
+        def to_pos(r, c):
+            """Convert wrapped row and column coordinates to a position.
+
+            Explanation:
+                Wraps both axes to preserve the toroidal board geometry before
+                flattening the coordinates.
+
+            Args:
+                r: Possibly unwrapped row coordinate.
+                c: Possibly unwrapped column coordinate.
+
+            Returns:
+                Flattened wrapped board position.
+            """
+            return (r % rows) * cols + (c % cols)
+
+        def next_pos(pos, action):
+            """Find the wrapped destination of one absolute action.
+
+            Explanation:
+                Applies this class's hard-coded direction offset and converts
+                the result back to a flattened board position.
+
+            Args:
+                pos: Flattened starting position.
+                action: Absolute direction name.
+
+            Returns:
+                Flattened destination position.
+            """
+            r, c = to_rc(pos)
+            dr, dc = self.move[action]
+            return to_pos(r + dr, c + dc)
+
+        def toroidal_distance(a, b):
+            """Calculate toroidal Manhattan distance between two positions.
+
+            Explanation:
+                Uses the shorter wrapped displacement on each board axis.
+
+            Args:
+                a: First flattened board position.
+                b: Second flattened board position.
+
+            Returns:
+                Toroidal Manhattan distance.
+            """
+            ar, ac = to_rc(a)
+            br, bc = to_rc(b)
+
+            dr = min(abs(ar - br), rows - abs(ar - br))
+            dc = min(abs(ac - bc), cols - abs(ac - bc))
+
+            return dr + dc
+
+        # 当前所有身体位置
+        occupied = set()
+        for goose in geese:
+            occupied.update(goose)
+
+        # 敌方鹅头下一步可能到达的位置
+        enemy_head_danger = set()
+
+        for i, goose in enumerate(geese):
+            if i == my_index or not goose:
+                continue
+
+            enemy_head = goose[0]
+
+            for action in self.actions:
+                enemy_head_danger.add(
+                    next_pos(enemy_head, action)
+                )
+
+        candidates = []
+
+        for action in self.actions:
+
+            # 不允许立即反向
+            if (
+                self.last_action is not None
+                and action == self.opposite[self.last_action]
+            ):
+                continue
+
+            new_pos = next_pos(my_head, action)
+
+            # 撞身体，直接排除
+            if new_pos in occupied:
+                continue
+
+            score = 0
+
+            # 避开敌方鹅头附近
+            if new_pos in enemy_head_danger:
+                score -= 100
+
+            # 靠近最近食物
+            if food:
+                old_dist = min(
+                    toroidal_distance(my_head, f)
+                    for f in food
+                )
+
+                new_dist = min(
+                    toroidal_distance(new_pos, f)
+                    for f in food
+                )
+
+                if new_dist < old_dist:
+                    score += 10
+                elif new_dist > old_dist:
+                    score -= 2
+
+            # 给一点随机扰动，避免四只完全同步
+            score += random.random()
+
+            candidates.append((score, action))
+
+        if candidates:
+            candidates.sort(reverse=True)
+            action = candidates[0][1]
+
+        else:
+            # 实在没安全路了
+            fallback = self.actions.copy()
+
+            if self.last_action is not None:
+                fallback.remove(self.opposite[self.last_action])
+
+            action = random.choice(fallback)
+
+        self.last_action = action
+        return action

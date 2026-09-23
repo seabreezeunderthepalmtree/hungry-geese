@@ -77,22 +77,37 @@ class SimpleAgent:
 
 ## Gameplay
 
+Render a play
 ```python
-agents = [SimpleAgent(),SimpleAgent(),SimpleAgent(),SimpleAgent(),] 
+#@title 跑一下
+from kaggle_environments import make, evaluate
+
+agents = [
+    SimpleAgent(),
+    SimpleAgent(),
+    SimpleAgent(),
+    SimpleAgent(),
+]
 
 env = make("hungry_geese", debug=True)
 
 env.run(agents)
+
+env.render(
+    mode="ipython",
+    width=800,
+    height=700
+)
 ```
 
+Render a JSON
 ```python
-env.render(mode="ipython",width=800,height=700) # render game
+import json
+from kaggle_environments import make
 
+path = "gameplays/random_init/game_000004.json"
 
-with open("replay.json", "w", encoding="utf-8") as file: # save as JSON
-    json.dump(env.toJSON(), file, ensure_ascii=False)
-
-with open("replay.json", "r", encoding="utf-8") as file: # render JSON
+with open(path, "r", encoding="utf-8") as file:
     replay = json.load(file)
 
 replay_env = make(
@@ -110,6 +125,15 @@ replay_env.render(
 ```
 
 ## JSON
+
+```python
+import json
+
+env.run(agents)
+
+with open("replay.json", "w", encoding="utf-8") as file:
+    json.dump(env.toJSON(), file, ensure_ascii=False)
+```
 
 ```json
 {
@@ -152,7 +176,7 @@ Status:
 `constants.py`:
     constants for coding
 `agent.py`:
-    load the model, let it read the observations, and return an action. The agent class is `Agent`.
+    load the model, let it read the observations, and return an action. The agent class is `Agent`. There's another class called `SimpleAgent` whose behavior is defined by code rather than by the model, to prevent `Agent` instances from cooperating with each other.
 `generate.py`: 
     generate gameplay for training. 
     Format: gameplays/model_000002/game_000001.json
@@ -167,21 +191,21 @@ models/model_000002.pt
 
 ## to-do
 
-
-
+train: Stable-Baselines3 PPO, each iteration ? epochs
 模型默认 CPU；外部调用 model.to("cuda"/"mps") 才使用 GPU。
 Agent 会自动把所有模型输入移到模型所在设备。
 生存模拟始终在 CPU。
 单局小模型推理建议 CPU；批量训练或批量推理再用 GPU。
 
 step0不会用作训练，因为不是模型的决定。
-注意模型命名规则
 
-reward = 存活步数 × (max_length + 1) + 当前身体长度 自己打自己会不会合作 然后如何弄局间奖励惩罚
+注意模型储存规则
 
-generate: generate 16 games, max time 200. Just run 4 agents using the latest model. If no model, use random weight.
+reward = 存活步数 × (max_length + 1) + 当前身体长度
+每步奖励 = delta_reward / 20000
+赢过一个对手：+1/3
+输给一个对手：-1/3
+平局：0
+10\%概率是simpleagent
 
-train: Stable-Baselines3 PPO, each iteration ? epochs
-
-val: early stopping；checkpoints combat each other;
 
