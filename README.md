@@ -1,86 +1,86 @@
-# DOCS
+# Hungry Geese PPO
 
-## Rules
+使用 PyTorch PPO 训练 Hungry Geese Agent。
+
+基本流程：
+
+```text
+generate.py 生成对局 JSON
+→ train.py 读取对局并训练
+→ 保存下一个模型
+→ 重复
+```
+
+## 游戏规则
 
 - 4 只鹅在 `7 × 11` 的环形棋盘上同时行动。
-- 动作：`NORTH / EAST / SOUTH / WEST`。
-- 棋盘上下、左右相连，例如从最上面向北会到最下面。
-- 不能立即反向；例如上一回合向东，本回合不能向西。
-- 吃到食物后身体增长，并补充食物，棋盘至少维持 2 个食物。
-- 每 40 步额外缩短一节，长度减到 0 就饿死。
-- 头撞到任何仍占用的身体格会死亡，包括自己。
-- 多只鹅的头同时进入同一格会发生碰撞。两只鹅同时死亡。
-- 最多 200 回合，目标首先是存活得更久，其次是保持更长。
-- 每回合提供完整信息，并非部分可观测环境。
+- 动作为 `NORTH / EAST / SOUTH / WEST`。
+- 棋盘上下、左右相连。
+- 不能立即选择当前方向的反方向。
+- 吃到食物后身体增长；没有吃到时尾巴正常缩短。
+- 每 40 步还会因饥饿额外缩短一节，长度变为 0 时死亡。
+- 头撞到碰撞结算时仍被占用的身体格会死亡，包括自己的身体和本回合稍后才消失的尾巴。
+- 多只鹅的头同时进入同一格会发生头部碰撞。
+- 一局最多 200 步，首先比较存活时间，其次比较身体长度。
+- 每回合提供完整棋盘信息，不是部分可观测环境。
 
-官方介绍见 [Hungry Geese Overview](https://www.kaggle.com/competitions/hungry-geese/overview)。
+官方累计 reward：
 
-一些游戏信息由AIfenxi[Kaggle Environment 源码](https://github.com/Kaggle/kaggle-environments/tree/master)得到。
+```text
+reward = 存活步数 × (max_length + 1) + 当前身体长度
+```
 
-## Observation
+参考：[Hungry Geese overview](https://www.kaggle.com/competitions/hungry-geese/overview) 和 [Kaggle Environments source](https://github.com/Kaggle/kaggle-environments)。
 
-Agent 的典型输入是：
+## Kaggle API
+
+### Observation
 
 ```python
 observation = {
-    "index": 0,               # 当前 agent 对应的玩家编号
-    "step": 37,               # 当前回合
+    "index": 0,              # 当前玩家编号
+    "step": 37,              # 当前步数
     "geese": [
-        [12, 13, 14],         # 玩家 0，首元素是头
+        [12, 13, 14],         # 第一个位置是头，最后一个位置是尾巴
         [42, 31],
-        [],
-        [70, 69, 68]
+        [],                   # 空数组表示已经死亡
+        [70, 69, 68],
     ],
     "food": [5, 61],
-    "remainingOverageTime": 60
+    "remainingOverageTime": 60,
 }
 ```
 
-位置采用一维整数编码：
+棋盘位置使用一维整数：
 
 ```python
-row = position // columns
-col = position % columns
-position = row * columns + col
+row = position // configuration["columns"]
+col = position % configuration["columns"]
+position = row * configuration["columns"] + col
 ```
 
-在默认 11 列棋盘中：
+`remainingOverageTime` 是 Kaggle 的计算时间额度，不是游戏剩余步数。
+
+### Agent 接口
+
+Kaggle 自动传入 `observation` 和 `configuration`：
+
+```python
+class MyAgent:
+    def __call__(self, observation, configuration):
+        return "NORTH"
+```
+
+返回值必须是：
 
 ```text
-0  1  2 ... 10
-11 12 13 ... 21
-...
-66 67 68 ... 76
+NORTH / EAST / SOUTH / WEST
 ```
 
-需要特别注意：
-
-- `geese[i][0]` 是第 `i` 只鹅的头。
-- 数组最后一项是尾巴。
-- `geese[i] == []` 表示该玩家已经死亡。
-- 观测中没有可靠的“上一动作”字段，通常通过前后两帧头部位置推断方向。
-- 因为棋盘是环面，推断移动必须使用取模运算。
-
-
-## Agent
+### 运行和渲染
 
 ```python
-from kaggle_environments import make, evaluate
-from kaggle_environments.envs.hungry_geese.hungry_geese import *
-
-class SimpleAgent:
-    def __call__(self, observation, configuration): # no need to input params yourself, Kaggle will do it
-        # code here
-        return "NORTH" # ACTIONS = ["NORTH", "SOUTH", "EAST", "WEST"]
-```
-
-
-## Gameplay
-
-Render a play
-```python
-#@title 跑一下
-from kaggle_environments import make, evaluate
+from kaggle_environments import make
 
 agents = [
     SimpleAgent(),
@@ -90,25 +90,55 @@ agents = [
 ]
 
 env = make("hungry_geese", debug=True)
-
 env.run(agents)
-
-env.render(
-    mode="ipython",
-    width=800,
-    height=700
-)
+env.render(mode="ipython", width=800, height=700)
 ```
 
-Render a JSON
+### 保存 replay
+
 ```python
 import json
+
+with open("replay.json", "w", encoding="utf-8") as replay_file:
+    json.dump(env.toJSON(), replay_file, ensure_ascii=False)
+```
+
+主要结构：
+
+```text
+replay
+├── name
+├── configuration
+├── info
+├── steps[step][player]
+│   ├── action
+│   ├── observation
+│   ├── reward
+│   ├── status
+│   └── info
+├── rewards
+└── statuses
+```
+
+Status：
+
+```text
+ACTIVE  仍在游戏中
+DONE    已死亡或对局正常结束
+INVALID 返回了非法动作
+ERROR   Agent 执行报错
+TIMEOUT Agent 超时
+```
+
+### 回放 JSON
+
+```python
+import json
+
 from kaggle_environments import make
 
-path = "gameplays/random_init/game_000004.json"
-
-with open(path, "r", encoding="utf-8") as file:
-    replay = json.load(file)
+with open("replay.json", "r", encoding="utf-8") as replay_file:
+    replay = json.load(replay_file)
 
 replay_env = make(
     replay["name"],
@@ -117,175 +147,283 @@ replay_env = make(
     steps=replay["steps"],
 )
 
-replay_env.render(
-    mode="ipython",
-    width=800,
-    height=700,
-)
+replay_env.render(mode="ipython", width=800, height=700)
 ```
 
-## JSON
+回放时应创建新的 `replay_env`，不要继续 render 之前已经运行过的 `env`。
 
-```python
-import json
+## 文件说明
 
-env.run(agents)
+### `utils.py`
 
-with open("replay.json", "w", encoding="utf-8") as file:
-    json.dump(env.toJSON(), file, ensure_ascii=False)
-```
+提供两个主要工具。
 
-```json
-{
-  "name": "hungry_geese",
-  "configuration": {},
-  "info": {},
-  "steps": [
-    [
-      {
-        "action": "NORTH",
-        "observation": {},
-        "reward": 0,
-        "status": "ACTIVE",
-        "info": {}
-      }
-    ]
-  ],
-  "rewards": [],
-  "statuses": [],
-  "schema_version": 1
-}
-```
-`steps[回合][玩家]`每回合每个玩家的完整状态。
+#### Observation to tensor
 
-reward = 存活步数 × (max_length + 1) + 当前身体长度
-
-Status: 
-    ACTIVE：仍在对局中。
-    DONE：正常结束，包括死亡或对局结束。
-    INVALID：返回了非法动作。
-    ERROR：Agent 运行报错。
-    TIMEOUT：Agent 超时。
-
-## Files
-
-`model.py`:
-    model architecture
-`utils.py`:
-    long functions used in other files
-`constants.py`:
-    constants for coding
-`agent.py`:
-    load the model, let it read the observations, and return an action. The agent class is `Agent`. There's another class called `SimpleAgent` whose behavior is defined by code rather than by the model, to prevent `Agent` instances from cooperating with each other.
-`generate.py`:
-    generate PPO-ready gameplay for training.
-    Format: gameplays/model_000002/game_000001.json
-    The greatest numeric model ID is loaded. A checkpoint may be a raw state_dict or a dictionary containing its state_dict under "model_state_dict". Training checkpoints also keep Adam state under "optimizer_state_dict". If no valid checkpoint exists, random weights are saved as `models/model_000000.pt` before any game is generated. Existing replay numbers are never overwritten.
-    Every player seat has a default 10% probability of using `SimpleAgent`, and every game keeps at least one model player.
-    Every replay keeps the official Kaggle fields and adds a top-level `ppo` object:
-        ppo
-        schema_version
-        model_id
-        player_types
-        trainable_players
-        trajectories[player]
-            step
-            relative_action
-            action_logit_vec
-            value
-            action_mask
-            policy_sampled
-    `relative_action` uses `FORWARD / LEFT / RIGHT` order. `action_logit_vec` contains the three raw model logits before masking, and `action_mask` uses the same order. `step == 0` and `SimpleAgent` decisions are not stored in PPO trajectories, as they are not model's decision. When `policy_sampled` is false, all survival actions were masked and the action came from the random fallback; exclude that record from the actor loss, but it can still train the critic.
-    command format: `python generate.py --games 16 --simple-agent-probability 0.1 --models-dir models --gameplays-dir gameplays --debug`
-
-`train.py`:
-    load the newest model and every replay in its matching gameplay directory, perform one PPO iteration, save the next model number, and save its training metrics.
-    command format: `python train.py --epochs 4 --minibatch-size 256 --learning-rate 0.0003 --device auto --logs-dir training_logs`
-
-
-Checkpoint format:
-models/model_000000.pt
-models/model_000001.pt
-models/model_000002.pt
-
-
-
-## Training
-
-Run gameplay generation first, then train once:
-
-```bash
-python generate.py --games 16
-python train.py
-```
-
-`train.py` finds the greatest checkpoint ID, reads only
-`gameplays/model_<same ID>/game_*.json`, and saves the successfully trained
-weights under the next ID. It never mixes trajectories produced by older
-policies and never overwrites an existing checkpoint.
-
-The initial random checkpoint may contain only a raw model state dictionary.
-Checkpoints written by `train.py` contain both `model_state_dict` and
-`optimizer_state_dict`, so Adam momentum and variance continue across training
-iterations. A command-line learning rate explicitly replaces the restored
-optimizer learning rate.
-
-Every successful iteration also writes a readable log with the same model ID:
+`observation_to_tensor()` 将 Kaggle observation 转换为：
 
 ```text
-training_logs/model_000001.json
-training_logs/model_000002.json
+tensor:    (11, 11, 13), float32
+direction: NORTH / EAST / SOUTH / WEST 对应的整数
 ```
 
-Each log contains the source and trained model IDs, checkpoint path, device,
-replay and decision counts, hyperparameters, and per-epoch `policy_loss`,
-`value_loss`, and `entropy`. Existing log files are never overwritten.
+棋盘以自己的头为中心，并旋转到当前移动方向始终朝上。13 个通道为：
 
-For a trajectory record at `step = t`:
+```text
+0:    自己的头
+1-3:  对手的头
+4:    自己的尾巴
+5-7:  对手的尾巴
+8:    自己的身体，不含头尾
+9-11: 对手的身体，不含头尾
+12:   食物
+```
 
-- input observation: `steps[t][player].observation`
-- action result: `steps[t + 1][player]`
-- dense reward: `(reward[t + 1] - reward[t]) / 20000`
-- done: the next player status is not `"ACTIVE"`, or it is the final replay step
+方向通常由头和脖子推断。长度为 1 时使用 Agent 保存的上一方向；只有第一步可以默认 `NORTH`。
 
-The final model decision also receives a competitive rank reward:
+#### Survival mask
 
-- first: `+1`
-- second: `+1/3`
-- third: `-1/3`
-- fourth: `-1`
+`get_survival_mask()` 返回四个绝对方向是否存在短期生存路径：
 
-A tie takes the lower occupied rank. For example, two players tied for first
-both receive the second-place reward. Rankings include both model and
-`SimpleAgent` players.
+```text
+(NORTH, EAST, SOUTH, WEST)
+```
 
-GAE is calculated backward and independently for each player trajectory using
-the saved old values. Defaults are `gamma = 0.99` and `gae_lambda = 0.95`.
-Afterward, decisions from every game and model player are combined. Each of the
-four default epochs reshuffles the complete rollout and divides it into
-mini-batches of at most 256 decisions.
+默认检查 2 步；如果全部被 mask，则退化为检查 1 步。模拟时禁止反向，并在尾巴消失前先进行碰撞判断。它不预测对手的未来动作，只过滤短期确定性死亡。
 
-Both old and new action probabilities use the saved `action_mask`. A record
-with `policy_sampled = false` stays in GAE and the critic loss, but is excluded
-from the actor and entropy losses. The total optimization loss is clipped PPO
-policy loss plus value loss minus masked-policy entropy, with gradient-norm
-clipping.
+### `model.py`
 
-`--device auto` prefers CUDA, then Apple MPS, then CPU. Common parameters can
-be changed with:
+定义 `HungryGeeseActorCritic`：
+
+```text
+(batch, 11, 11, 13)
+→ 定制环形 padding
+→ Conv2d(13 → 16, 3×3) + SiLU
+→ 定制环形 padding
+→ Conv2d(16 → 16, 3×3) + SiLU
+→ Flatten
+→ Linear(1936 → 15) + SiLU
+```
+
+将 15 维棋盘特征与 1 维归一化剩余时间拼接：
+
+```text
+Actor:  16 → 16 → 3 logits
+Critic: 16 → 16 → 1 value
+```
+
+三个相对动作固定为：
+
+```text
+0 = FORWARD
+1 = LEFT
+2 = RIGHT
+```
+
+模型不使用 BatchNorm、LayerNorm 或 Dropout。
+
+### `agent.py`
+
+`Agent` 读取模型，根据 observation 得到相对动作，再转换为绝对方向：
+
+```text
+NORTH / EAST / SOUTH / WEST
+```
+
+第一步不使用模型，而是在安全方向中选择最接近食物的方向。之后的步骤：
+
+```text
+observation
+→ tensor 和当前方向
+→ model logits/value
+→ survival mask
+→ 采样 FORWARD/LEFT/RIGHT
+→ 转换为绝对方向
+```
+
+该文件还包含 `SimpleAgent`。它使用 survival mask、避开对手头部可能到达的位置，并倾向靠近食物。生成对局时加入部分 `SimpleAgent`，用于打破完全同质的自博弈，降低多个相同模型学会合作的可能性。
+
+### `constants.py`
+
+保存整个项目共享的常量，包括棋盘、动作、张量通道、模型结构、文件名和 PPO 默认参数。
+
+其他文件统一使用：
+
+```python
+from constants import *
+```
+
+不要在其他文件重复定义相同常量。
+
+### `generate.py`
+
+读取最新模型并生成训练对局：
 
 ```bash
-python train.py \
-    --epochs 4 \
-    --minibatch-size 256 \
-    --learning-rate 0.0003 \
-    --gamma 0.99 \
-    --gae-lambda 0.95 \
-    --clip-coefficient 0.2 \
-    --value-loss-coefficient 0.5 \
-    --entropy-coefficient 0.01 \
-    --max-gradient-norm 0.5 \
-    --device auto \
-    --logs-dir training_logs \
-    --seed 0
+python generate.py --games 32
 ```
+
+如果没有模型，会创建随机初始化的：
+
+```text
+models/model_000000.pt
+```
+
+每个座位默认有 10% 概率使用 `SimpleAgent`，但每局至少保留一个模型玩家。对局保存为：
+
+```text
+gameplays/model_000000/game_000001.json
+```
+
+JSON 保留 Kaggle 原始 replay，并增加 `ppo`：
+
+```text
+ppo
+├── schema_version
+├── model_id
+├── player_types ["model", "simple", "model", "model"]
+├── trainable_players [0, 2, 3]
+└── trajectories[player]
+    ├── step
+    ├── relative_action
+    ├── action_logit_vec
+    ├── value
+    ├── action_mask
+    └── policy_sampled
+```
+
+`policy_sampled = false` 表示所有动作都被 mask，最终使用了随机fallback。这类记录可训练 Critic，但不参与 Actor loss。
+
+### `train.py`
+
+读取最新模型对应的全部对局，完成一次 PPO iteration：
+
+```bash
+python train.py --device auto
+```
+
+流程：
+
+```text
+读取 replay
+→ 重建 observation tensor
+→ 计算每步 reward 和终局排名奖励
+→ 按玩家计算 GAE 和 return
+→ 合并所有模型决策
+→ 分 mini-batch 训练多个 epochs
+→ 保存下一个模型和训练日志
+```
+
+#### Reward
+
+每一步先计算 Kaggle 累计 reward 的变化：
+
+$$
+r_t = (OfficialReward[t+1] - OfficialReward[t]) / 20000
+$$
+
+每名玩家最后一个模型决策再加入终局排名奖励：
+
+```text
+第一名 +1
+第二名 +1/3
+第三名 -1/3
+第四名 -1
+```
+
+并列时取较低名次，例如两只鹅并列第一时都算第二名。
+
+#### GAE
+
+每局、每名模型玩家分别从后向前计算：
+
+$$
+\delta_t = r_t + \gamma × (1 - done_t) × V_{(t+1)} - V_t
+$$
+$$
+A_t = \delta_t
+    + \gamma × \lambda × (1 - done_t) × A_{(t+1)}
+$$
+$$
+return_t = A_t + V_t
+$$
+
+- `V_t` 是生成对局时保存的旧模型 value；
+- `done_t = 1` 时不使用下一状态的 value；
+- 默认 `gamma = 0.99`；
+- 默认 `lambda = 0.95`；
+- 所有对局合并后，只标准化能够训练 Actor 的 advantage；
+- `return_t` 是 Critic 的训练目标，不进行标准化。
+
+#### PPO policy loss
+
+先使用保存的 `action_mask`，分别计算旧模型和当前模型对已选择动作的 log probability：
+
+$$
+ratio_t = exp(NewLogProbability_t - OldLogProbability_t)
+$$
+$$
+unclipped_t = ratio_t × A_t
+$$
+$$
+clipped_t   = clip(ratio_t, 1-epsilon, 1+epsilon) × A_t
+$$
+$$
+PolicyLoss = -mean(min(unclipped_t, clipped_t))
+$$
+
+mean是对一个batch的所有决策平均
+
+默认 `epsilon = 0.2`。clip 限制一次训练对策略概率造成过大的改变。
+
+#### Value loss
+
+$$
+value_loss = 0.5 × mean((V_new - return)^2)
+$$
+
+Critic 学习预测当前状态之后的折扣回报。
+
+#### Entropy
+
+$$
+entropy = mean(H(masked_policy))
+$$
+
+entropy 由应用 `action_mask` 后的当前 logits 计算，用于保留探索。三个动作都可用时最大值为 `ln(3)`。
+
+#### Total loss
+
+$$
+total_loss = policy_loss
+           + 0.5 × value_loss
+           - 0.01 × entropy
+$$
+
+之后执行反向传播，将 gradient norm 裁剪到 `0.5`，再调用一次 `optimizer.step()`。
+
+`policy_sampled = false` 的全 mask fallback：
+
+- 仍参与 GAE、return 和 value loss；
+- 不参与 policy loss；
+- 不参与 entropy。
+
+默认每个 mini-batch 最多包含 256 个模型决策，每个 mini-batch 更新一次参数。全部数据训练 4 个 epochs，并在每个 epoch 开始时重新打乱。
+
+输出：
+
+```text
+models/model_000001.pt
+training_logs/model_000001.json
+```
+
+`--device auto` 按 `CUDA → MPS → CPU` 选择训练设备。
+
+## 运行
+
+```bash
+python generate.py --games 32
+python train.py --device auto
+```
+
+重复这两条命令即可继续训练。
